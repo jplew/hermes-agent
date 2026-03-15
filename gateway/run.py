@@ -927,11 +927,38 @@ class GatewayRunner:
                         )
             return None
         
-        # PRIORITY: If an agent is already running for this session, interrupt it
-        # immediately. This is before command parsing to minimize latency -- the
-        # user's "stop" message reaches the agent as fast as possible.
+        # PRIORITY handling when an agent is already running for this session.
+        # Default behavior is to interrupt immediately so user text/stop messages
+        # are handled with minimal latency.
+        #
+        # Special case: Telegram/photo bursts often arrive as multiple near-
+        # simultaneous updates. Do NOT interrupt for photo-only follow-ups here;
+        # let the adapter-level batching/queueing logic absorb them.
         _quick_key = build_session_key(source)
         if _quick_key in self._running_agents:
+            if event.message_type == MessageType.PHOTO:
+                logger.debug("PRIORITY photo follow-up for session %s — queueing without interrupt", _quick_key[:20])
+                adapter = self.adapters.get(source.platform)
+                if adapter:
+                    # Reuse adapter queue semantics so photo bursts merge cleanly.
+                    if _quick_key in adapter._pending_messages:
+                        existing = adapter._pending_messages[_quick_key]
+                        if getattr(existing, "message_type", None) == MessageType.PHOTO:
+                            existing.media_urls.extend(event.media_urls)
+                            existing.media_types.extend(event.media_types)
+                            if hasattr(existing, "media_cdn_urls") and hasattr(event, "media_cdn_urls"):
+                                existing.media_cdn_urls.extend(event.media_cdn_urls)
+                            if event.text:
+                                if not existing.text:
+                                    existing.text = event.text
+                                elif event.text not in existing.text:
+                                    existing.text = f"{existing.text}\n\n{event.text}".strip()
+                        else:
+                            adapter._pending_messages[_quick_key] = event
+                    else:
+                        adapter._pending_messages[_quick_key] = event
+                return None
+
             running_agent = self._running_agents[_quick_key]
             logger.debug("PRIORITY interrupt for session %s", _quick_key[:20])
             running_agent.interrupt(event.text)
@@ -2945,9 +2972,10 @@ class GatewayRunner:
           1. Immediately understand what the user sent (no extra tool call).
           2. Re-examine the image with vision_analyze if it needs more detail.
 
-        If image_cdn_urls is provided (parallel list), the permanent R2 CDN URL
-        is included in the annotation so the agent can use it directly in
-        Athabasca DB calls (e.g. as imageUrl in a research report).
+        If image_cdn_urls is provided (parallel list), it may be surfaced as
+        non-canonical gateway storage metadata. Athabasca persistence should
+        still happen through Athabasca's own POST /api/uploads flow, using the
+        returned asset.publicUrl rather than local cache paths or gateway URLs.
 
         Args:
             user_text:      The user's original caption / message text.
@@ -2979,16 +3007,22 @@ class GatewayRunner:
                 result = _json.loads(result_json)
                 if result.get("success"):
                     description = result.get("analysis", "")
-                    cdn_note = (
-                        f"\n[Permanent R2 URL (use as imageUrl in Athabasca): {cdn_url} ~]"
+                    storage_note = (
+                        f"\n[Gateway media URL available for reference: {cdn_url}]"
                         if cdn_url else
-                        "\n[R2 not configured — no permanent URL available for this image]"
+                        ""
+                    )
+                    athabasca_note = (
+                        "\n[If this image needs to persist in Athabasca state, upload the cached file "
+                        "through Athabasca POST /api/uploads and use the returned asset.publicUrl. "
+                        "Do not store the local cache path or any gateway URL as the canonical imageUrl.]"
                     )
                     enriched_parts.append(
                         f"[The user sent an image~ Here's what I can see:\n{description}]\n"
                         f"[If you need a closer look, use vision_analyze with "
                         f"image_url: {path} ~]"
-                        f"{cdn_note}"
+                        f"{storage_note}"
+                        f"{athabasca_note}"
                     )
                 else:
                     enriched_parts.append(

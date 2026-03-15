@@ -110,6 +110,11 @@ class TelegramAdapter(BasePlatformAdapter):
         super().__init__(config, Platform.TELEGRAM)
         self._app: Optional[Application] = None
         self._bot: Optional[Bot] = None
+        # Buffer rapid/album photo updates so Telegram image bursts are handled
+        # as a single MessageEvent instead of self-interrupting multiple turns.
+        self._media_batch_delay_seconds = float(os.getenv("HERMES_TELEGRAM_MEDIA_BATCH_DELAY_SECONDS", "0.8"))
+        self._pending_photo_batches: Dict[str, MessageEvent] = {}
+        self._pending_photo_batch_tasks: Dict[str, asyncio.Task] = {}
     
     async def connect(self) -> bool:
         """Connect to Telegram and start polling for updates."""
@@ -202,6 +207,12 @@ class TelegramAdapter(BasePlatformAdapter):
             except Exception as e:
                 logger.warning("[%s] Error during Telegram disconnect: %s", self.name, e, exc_info=True)
         
+        for task in self._pending_photo_batch_tasks.values():
+            if task and not task.done():
+                task.cancel()
+        self._pending_photo_batch_tasks.clear()
+        self._pending_photo_batches.clear()
+
         self._running = False
         self._app = None
         self._bot = None
@@ -717,6 +728,50 @@ class TelegramAdapter(BasePlatformAdapter):
         event.text = "\n".join(parts)
         await self.handle_message(event)
 
+    def _photo_batch_key(self, event: MessageEvent, msg: Message) -> str:
+        """Return a batching key for Telegram photos/albums."""
+        from gateway.session import build_session_key
+        session_key = build_session_key(event.source)
+        media_group_id = getattr(msg, "media_group_id", None)
+        if media_group_id:
+            return f"{session_key}:album:{media_group_id}"
+        return f"{session_key}:photo-burst"
+
+    async def _flush_photo_batch(self, batch_key: str) -> None:
+        """Send a buffered photo burst/album as a single MessageEvent."""
+        current_task = asyncio.current_task()
+        try:
+            await asyncio.sleep(self._media_batch_delay_seconds)
+            event = self._pending_photo_batches.pop(batch_key, None)
+            if not event:
+                return
+            logger.info("[Telegram] Flushing photo batch %s with %d image(s)", batch_key, len(event.media_urls))
+            await self.handle_message(event)
+        finally:
+            if self._pending_photo_batch_tasks.get(batch_key) is current_task:
+                self._pending_photo_batch_tasks.pop(batch_key, None)
+
+    def _enqueue_photo_event(self, batch_key: str, event: MessageEvent) -> None:
+        """Merge photo events into a pending batch and schedule flush."""
+        existing = self._pending_photo_batches.get(batch_key)
+        if existing is None:
+            self._pending_photo_batches[batch_key] = event
+        else:
+            existing.media_urls.extend(event.media_urls)
+            existing.media_types.extend(event.media_types)
+            existing.media_cdn_urls.extend(event.media_cdn_urls)
+            if event.text:
+                if not existing.text:
+                    existing.text = event.text
+                elif event.text not in existing.text:
+                    existing.text = f"{existing.text}\n\n{event.text}".strip()
+
+        prior_task = self._pending_photo_batch_tasks.get(batch_key)
+        if prior_task and not prior_task.done():
+            prior_task.cancel()
+
+        self._pending_photo_batch_tasks[batch_key] = asyncio.create_task(self._flush_photo_batch(batch_key))
+
     async def _handle_media_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming media messages, downloading images to local cache."""
         if not update.message:
@@ -754,8 +809,9 @@ class TelegramAdapter(BasePlatformAdapter):
         
         # Download photo to local image cache so the vision tool can access it
         # even after Telegram's ephemeral file URLs expire (~1 hour).
-        # Also upload to Cloudflare R2 for a permanent public URL that can be
-        # stored in the Athabasca research DB (imageUrl field).
+        # A gateway-managed public URL may also be created, but Athabasca should
+        # still persist media through its own POST /api/uploads flow and store
+        # the returned asset.publicUrl as the canonical DB URL.
         if msg.photo:
             try:
                 # msg.photo is a list of PhotoSize sorted by size; take the largest
@@ -780,12 +836,10 @@ class TelegramAdapter(BasePlatformAdapter):
                 # The CDN URL is stored in media_cdn_urls[0] alongside the local path.
                 # Falls back gracefully (cdn_url = "") if R2 is not configured.
                 try:
-                    from gateway.storage.r2 import upload_bytes as r2_upload_bytes, make_r2_key
+                    from gateway.storage.r2 import upload_bytes as r2_upload_bytes
                     import re as _re
                     from datetime import datetime as _dt, timezone as _tz
 
-                    # Derive a project-slug-agnostic key under athabasca/inbox/
-                    # The agent decides the final project key when it stores the URL.
                     timestamp = _dt.now(_tz.utc).strftime("%Y%m%d_%H%M%S")
                     safe_chat = _re.sub(r"[^a-zA-Z0-9_-]", "_", str(event.source.channel_id if event.source else "unknown"))
                     filename = f"tg_{safe_chat}_{timestamp}{ext}"
@@ -809,6 +863,9 @@ class TelegramAdapter(BasePlatformAdapter):
                     cdn_url = ""
 
                 event.media_cdn_urls = [cdn_url]
+                batch_key = self._photo_batch_key(event, msg)
+                self._enqueue_photo_event(batch_key, event)
+                return
 
             except Exception as e:
                 logger.warning("[Telegram] Failed to cache photo: %s", e, exc_info=True)
