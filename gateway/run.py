@@ -946,8 +946,6 @@ class GatewayRunner:
                         if getattr(existing, "message_type", None) == MessageType.PHOTO:
                             existing.media_urls.extend(event.media_urls)
                             existing.media_types.extend(event.media_types)
-                            if hasattr(existing, "media_cdn_urls") and hasattr(event, "media_cdn_urls"):
-                                existing.media_cdn_urls.extend(event.media_cdn_urls)
                             if event.text:
                                 if not existing.text:
                                     existing.text = event.text
@@ -1419,7 +1417,6 @@ class GatewayRunner:
         message_text = event.text or ""
         if event.media_urls:
             image_paths = []
-            image_cdn_urls = []
             for i, path in enumerate(event.media_urls):
                 # Check media_types if available; otherwise infer from message type
                 mtype = event.media_types[i] if i < len(event.media_types) else ""
@@ -1429,11 +1426,9 @@ class GatewayRunner:
                 )
                 if is_image:
                     image_paths.append(path)
-                    cdn_url = event.media_cdn_urls[i] if i < len(event.media_cdn_urls) else ""
-                    image_cdn_urls.append(cdn_url)
             if image_paths:
                 message_text = await self._enrich_message_with_vision(
-                    message_text, image_paths, image_cdn_urls=image_cdn_urls
+                    message_text, image_paths
                 )
         
         # -----------------------------------------------------------------
@@ -2961,7 +2956,6 @@ class GatewayRunner:
         self,
         user_text: str,
         image_paths: List[str],
-        image_cdn_urls: List[str] | None = None,
     ) -> str:
         """
         Auto-analyze user-attached images with the vision tool and prepend
@@ -2972,16 +2966,13 @@ class GatewayRunner:
           1. Immediately understand what the user sent (no extra tool call).
           2. Re-examine the image with vision_analyze if it needs more detail.
 
-        If image_cdn_urls is provided (parallel list), it may be surfaced as
-        non-canonical gateway storage metadata. Athabasca persistence should
-        still happen through Athabasca's own POST /api/uploads flow, using the
-        returned asset.publicUrl rather than local cache paths or gateway URLs.
+        Athabasca persistence should happen through Athabasca's own POST
+        /api/uploads flow, using the returned asset.publicUrl rather than local
+        cache paths.
 
         Args:
             user_text:      The user's original caption / message text.
             image_paths:    List of local file paths to cached images.
-            image_cdn_urls: Optional parallel list of permanent CDN URLs (R2).
-                            Empty string means not available for that index.
 
         Returns:
             The enriched message string with vision descriptions prepended.
@@ -2996,8 +2987,7 @@ class GatewayRunner:
         )
 
         enriched_parts = []
-        for idx, path in enumerate(image_paths):
-            cdn_url = (image_cdn_urls[idx] if image_cdn_urls and idx < len(image_cdn_urls) else "") or ""
+        for path in image_paths:
             try:
                 logger.debug("Auto-analyzing user image: %s", path)
                 result_json = await vision_analyze_tool(
@@ -3007,21 +2997,15 @@ class GatewayRunner:
                 result = _json.loads(result_json)
                 if result.get("success"):
                     description = result.get("analysis", "")
-                    storage_note = (
-                        f"\n[Gateway media URL available for reference: {cdn_url}]"
-                        if cdn_url else
-                        ""
-                    )
                     athabasca_note = (
                         "\n[If this image needs to persist in Athabasca state, upload the cached file "
                         "through Athabasca POST /api/uploads and use the returned asset.publicUrl. "
-                        "Do not store the local cache path or any gateway URL as the canonical imageUrl.]"
+                        "Do not store the local cache path as the canonical imageUrl.]"
                     )
                     enriched_parts.append(
                         f"[The user sent an image~ Here's what I can see:\n{description}]\n"
                         f"[If you need a closer look, use vision_analyze with "
                         f"image_url: {path} ~]"
-                        f"{storage_note}"
                         f"{athabasca_note}"
                     )
                 else:

@@ -759,7 +759,6 @@ class TelegramAdapter(BasePlatformAdapter):
         else:
             existing.media_urls.extend(event.media_urls)
             existing.media_types.extend(event.media_types)
-            existing.media_cdn_urls.extend(event.media_cdn_urls)
             if event.text:
                 if not existing.text:
                     existing.text = event.text
@@ -809,9 +808,6 @@ class TelegramAdapter(BasePlatformAdapter):
         
         # Download photo to local image cache so the vision tool can access it
         # even after Telegram's ephemeral file URLs expire (~1 hour).
-        # A gateway-managed public URL may also be created, but Athabasca should
-        # still persist media through its own POST /api/uploads flow and store
-        # the returned asset.publicUrl as the canonical DB URL.
         if msg.photo:
             try:
                 # msg.photo is a list of PhotoSize sorted by size; take the largest
@@ -829,47 +825,15 @@ class TelegramAdapter(BasePlatformAdapter):
                 # Save to local cache (for vision tool access)
                 cached_path = cache_image_from_bytes(bytes(image_bytes), ext=ext)
                 event.media_urls = [cached_path]
-                event.media_types = [f"image/{ext.lstrip('.')}"]
+                event.media_types = [f"image/{ext.lstrip('.')}" ]
                 logger.info("[Telegram] Cached user photo at %s", cached_path)
-
-                # Upload to Cloudflare R2 for a permanent public URL.
-                # The CDN URL is stored in media_cdn_urls[0] alongside the local path.
-                # Falls back gracefully (cdn_url = "") if R2 is not configured.
-                try:
-                    from gateway.storage.r2 import upload_bytes as r2_upload_bytes
-                    import re as _re
-                    from datetime import datetime as _dt, timezone as _tz
-
-                    timestamp = _dt.now(_tz.utc).strftime("%Y%m%d_%H%M%S")
-                    safe_chat = _re.sub(r"[^a-zA-Z0-9_-]", "_", str(event.source.channel_id if event.source else "unknown"))
-                    filename = f"tg_{safe_chat}_{timestamp}{ext}"
-                    key = f"athabasca/inbox/{filename}"
-
-                    r2_result = await r2_upload_bytes(
-                        key=key,
-                        data=bytes(image_bytes),
-                        content_type=f"image/{ext.lstrip('.')}",
-                        extra_metadata={"source": "telegram-upload"},
-                    )
-
-                    cdn_url = r2_result.public_url if r2_result else ""
-                    if cdn_url:
-                        logger.info("[Telegram] Uploaded photo to R2: %s", cdn_url)
-                    else:
-                        logger.debug("[Telegram] R2 upload skipped (not configured)")
-
-                except Exception as r2_err:
-                    logger.warning("[Telegram] R2 upload failed: %s", r2_err)
-                    cdn_url = ""
-
-                event.media_cdn_urls = [cdn_url]
                 batch_key = self._photo_batch_key(event, msg)
                 self._enqueue_photo_event(batch_key, event)
                 return
 
             except Exception as e:
                 logger.warning("[Telegram] Failed to cache photo: %s", e, exc_info=True)
-        
+
         # Download voice/audio messages to cache for STT transcription
         if msg.voice:
             try:

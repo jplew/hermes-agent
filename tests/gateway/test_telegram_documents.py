@@ -500,7 +500,6 @@ class TestTelegramPhotoBatching:
             source=SimpleNamespace(channel_id="chat-1"),
             media_urls=["/tmp/a.jpg"],
             media_types=["image/jpeg"],
-            media_cdn_urls=[""],
         )
 
         with (
