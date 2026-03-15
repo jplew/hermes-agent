@@ -18,7 +18,7 @@ import pytest
 
 import run_agent
 from honcho_integration.client import HonchoClientConfig
-from run_agent import AIAgent, _inject_honcho_turn_context
+from run_agent import AIAgent, _build_honcho_turn_prefill
 from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
 
 
@@ -1499,11 +1499,11 @@ class TestSystemPromptStability:
         should_prefetch = bool(conversation_history) and recall_mode != "tools"
         assert should_prefetch is True
 
-    def test_inject_honcho_turn_context_appends_system_note(self):
-        content = _inject_honcho_turn_context("hello", "## Honcho Memory\nprior context")
-        assert "hello" in content
-        assert "Honcho memory was retrieved from prior sessions" in content
-        assert "## Honcho Memory" in content
+    def test_build_honcho_turn_prefill_keeps_context_out_of_user_payload(self):
+        prefill = _build_honcho_turn_prefill("continue with the migration checklist")
+        assert prefill["role"] == "assistant"
+        assert "Continuity note" in prefill["content"]
+        assert "migration checklist" in prefill["content"]
 
     def test_honcho_continuing_session_keeps_turn_context_out_of_system_prompt(self, agent):
         captured = {}
@@ -1527,7 +1527,7 @@ class TestSystemPromptStability:
         ]
 
         with (
-            patch.object(agent, "_honcho_prefetch", return_value="## Honcho Memory\nprior context"),
+            patch.object(agent, "_honcho_prefetch", return_value="continue with the migration checklist"),
             patch.object(agent, "_queue_honcho_prefetch"),
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
@@ -1539,12 +1539,14 @@ class TestSystemPromptStability:
         assert result["completed"] is True
         api_messages = captured["messages"]
         assert api_messages[0]["role"] == "system"
-        assert "prior context" not in api_messages[0]["content"]
+        assert "migration checklist" not in api_messages[0]["content"]
+        continuity_prefill = api_messages[-2]
+        assert continuity_prefill["role"] == "assistant"
+        assert "Continuity note" in continuity_prefill["content"]
+        assert "migration checklist" in continuity_prefill["content"]
         current_user = api_messages[-1]
         assert current_user["role"] == "user"
-        assert "what were we doing?" in current_user["content"]
-        assert "prior context" in current_user["content"]
-        assert "Honcho memory was retrieved from prior sessions" in current_user["content"]
+        assert current_user["content"] == "what were we doing?"
 
     def test_honcho_prefetch_runs_on_first_turn(self):
         """Honcho prefetch should run when conversation_history is empty."""
@@ -1707,6 +1709,16 @@ class TestHonchoPrefetchScheduling:
 
         assert "Continuity synthesis" in context
         assert "migration checklist" in context
+
+    def test_honcho_prefetch_for_continuing_turn_returns_only_compact_dialectic(self, agent):
+        agent._honcho = MagicMock()
+        agent._honcho_session_key = "session-key"
+        agent._honcho.pop_dialectic_result.return_value = "Continue with the migration checklist."
+
+        context = agent._honcho_prefetch("what next?", include_profiles=False)
+
+        assert context == "Continue with the migration checklist."
+        agent._honcho.pop_context_result.assert_not_called()
 
     def test_queue_honcho_prefetch_skips_tools_mode(self, agent):
         agent._honcho = MagicMock()

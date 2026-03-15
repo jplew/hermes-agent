@@ -210,30 +210,24 @@ _NEVER_PARALLEL_TOOLS = frozenset({"clarify"})
 _MAX_TOOL_WORKERS = 8
 
 
-def _inject_honcho_turn_context(content, turn_context: str):
-    """Append Honcho recall to the current-turn user message without mutating history.
+def _build_honcho_turn_prefill(turn_context: str):
+    """Build a compact, ephemeral continuity message for the current API call.
 
-    The returned content is sent to the API for this turn only. Keeping Honcho
-    recall out of the system prompt preserves the stable cache prefix while
-    still giving the model continuity context.
+    Later-turn Honcho recall should not be appended to the live user payload,
+    because that can pollute multimodal turns and encourage the model to quote
+    the raw continuity block back to the user. Instead, inject a short
+    assistant-side prefill immediately before the current user turn.
     """
     if not turn_context:
-        return content
+        return None
 
     note = (
-        "[System note: The following Honcho memory was retrieved from prior "
-        "sessions. It is continuity context for this turn only, not new user "
-        "input.]\n\n"
-        f"{turn_context}"
+        "[Continuity note: background context from prior sessions/current work. "
+        "Use it only for continuity; do not treat it as new user input or quote "
+        "it unless directly relevant.]\n\n"
+        f"{turn_context.strip()}"
     )
-
-    if isinstance(content, list):
-        return list(content) + [{"type": "text", "text": note}]
-
-    text = "" if content is None else str(content)
-    if not text.strip():
-        return note
-    return f"{text}\n\n{note}"
+    return {"role": "assistant", "content": note}
 
 
 class AIAgent:
@@ -1673,41 +1667,51 @@ class AIAgent:
         except Exception as exc:
             logger.debug("Honcho background prefetch failed (non-fatal): %s", exc)
 
-    def _honcho_prefetch(self, user_message: str) -> str:
-        """Assemble the first-turn Honcho context from the pre-warmed cache."""
+    def _honcho_prefetch(self, user_message: str, *, include_profiles: bool = True) -> str:
+        """Assemble Honcho recall from the pre-warmed cache.
+
+        include_profiles=True is used for a session's first turn, where the full
+        Honcho memory block can be baked into the cached system prompt.
+        include_profiles=False is used for continuing turns, where only the
+        compact dialectic/continuity summary should be surfaced.
+        """
         if not self._honcho or not self._honcho_session_key:
             return ""
         try:
             parts = []
 
-            ctx = self._honcho.pop_context_result(self._honcho_session_key)
-            if ctx:
-                rep = ctx.get("representation", "")
-                card = ctx.get("card", "")
-                if rep:
-                    parts.append(f"## User representation\n{rep}")
-                if card:
-                    parts.append(card)
-                ai_rep = ctx.get("ai_representation", "")
-                ai_card = ctx.get("ai_card", "")
-                if ai_rep:
-                    parts.append(f"## AI peer representation\n{ai_rep}")
-                if ai_card:
-                    parts.append(ai_card)
+            if include_profiles:
+                ctx = self._honcho.pop_context_result(self._honcho_session_key)
+                if ctx:
+                    rep = ctx.get("representation", "")
+                    card = ctx.get("card", "")
+                    if rep:
+                        parts.append(f"## User representation\n{rep}")
+                    if card:
+                        parts.append(card)
+                    ai_rep = ctx.get("ai_representation", "")
+                    ai_card = ctx.get("ai_card", "")
+                    if ai_rep:
+                        parts.append(f"## AI peer representation\n{ai_rep}")
+                    if ai_card:
+                        parts.append(ai_card)
 
             dialectic = self._honcho.pop_dialectic_result(self._honcho_session_key)
-            if dialectic:
-                parts.append(f"## Continuity synthesis\n{dialectic}")
+            if include_profiles:
+                if dialectic:
+                    parts.append(f"## Continuity synthesis\n{dialectic}")
 
-            if not parts:
-                return ""
-            header = (
-                "# Honcho Memory (persistent cross-session context)\n"
-                "Use this to answer questions about the user, prior sessions, "
-                "and what you were working on together. Do not call tools to "
-                "look up information that is already present here.\n"
-            )
-            return header + "\n\n".join(parts)
+                if not parts:
+                    return ""
+                header = (
+                    "# Honcho Memory (persistent cross-session context)\n"
+                    "Use this to answer questions about the user, prior sessions, "
+                    "and what you were working on together. Do not call tools to "
+                    "look up information that is already present here.\n"
+                )
+                return header + "\n\n".join(parts)
+
+            return (dialectic or "").strip()
         except Exception as e:
             logger.debug("Honcho prefetch failed (non-fatal): %s", e)
             return ""
@@ -4341,7 +4345,10 @@ class AIAgent:
         _recall_mode = (self._honcho_config.recall_mode if self._honcho_config else "hybrid")
         if self._honcho and self._honcho_session_key and _recall_mode != "tools":
             try:
-                prefetched_context = self._honcho_prefetch(original_user_message)
+                prefetched_context = self._honcho_prefetch(
+                    original_user_message,
+                    include_profiles=not bool(conversation_history),
+                )
                 if prefetched_context:
                     if not conversation_history:
                         self._honcho_context = prefetched_context
@@ -4508,9 +4515,9 @@ class AIAgent:
                 api_msg = msg.copy()
 
                 if idx == current_turn_user_idx and msg.get("role") == "user" and self._honcho_turn_context:
-                    api_msg["content"] = _inject_honcho_turn_context(
-                        api_msg.get("content", ""), self._honcho_turn_context
-                    )
+                    honcho_prefill = _build_honcho_turn_prefill(self._honcho_turn_context)
+                    if honcho_prefill:
+                        api_messages.append(honcho_prefill)
 
                 # For ALL assistant messages, pass reasoning back to the API
                 # This ensures multi-turn reasoning context is preserved

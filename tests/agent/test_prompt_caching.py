@@ -57,6 +57,30 @@ class TestApplyCacheMarker:
         # Should not crash on empty list
         _apply_cache_marker(msg, MARKER)
 
+    def test_list_content_skips_empty_trailing_text_block(self):
+        msg = {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Real content"},
+                {"type": "text", "text": ""},
+            ],
+        }
+        _apply_cache_marker(msg, MARKER)
+        assert msg["content"][0]["cache_control"] == MARKER
+        assert "cache_control" not in msg["content"][1]
+
+    def test_list_content_falls_back_to_top_level_when_all_text_blocks_empty(self):
+        msg = {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": ""},
+                {"type": "text", "text": ""},
+            ],
+        }
+        _apply_cache_marker(msg, MARKER)
+        assert msg["cache_control"] == MARKER
+        assert all("cache_control" not in item for item in msg["content"])
+
 
 class TestApplyAnthropicCacheControl:
     def test_empty_messages(self):

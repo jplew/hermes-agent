@@ -13,7 +13,12 @@ from typing import Any, Dict, List
 
 
 def _apply_cache_marker(msg: dict, cache_marker: dict) -> None:
-    """Add cache_control to a single message, handling all format variations."""
+    """Add cache_control to a single message, handling all format variations.
+
+    Anthropic rejects cache_control on empty text blocks, so for structured
+    content we must find the last non-empty block instead of blindly marking
+    the final item.
+    """
     role = msg.get("role", "")
     content = msg.get("content")
 
@@ -32,9 +37,20 @@ def _apply_cache_marker(msg: dict, cache_marker: dict) -> None:
         return
 
     if isinstance(content, list) and content:
-        last = content[-1]
-        if isinstance(last, dict):
-            last["cache_control"] = cache_marker
+        for item in reversed(content):
+            if not isinstance(item, dict):
+                continue
+
+            if item.get("type") == "text":
+                if item.get("text"):
+                    item["cache_control"] = cache_marker
+                    return
+                continue
+
+            item["cache_control"] = cache_marker
+            return
+
+        msg["cache_control"] = cache_marker
 
 
 def apply_anthropic_cache_control(
