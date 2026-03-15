@@ -37,12 +37,13 @@ COMMANDS_BY_CATEGORY = {
         "/verbose": "Cycle tool progress display: off → new → all → verbose",
         "/reasoning": "Manage reasoning effort and display (usage: /reasoning [level|show|hide])",
         "/skin": "Show or change the display skin/theme",
+        "/voice": "Toggle voice mode (Ctrl+B to record). Usage: /voice [on|off|tts|status]",
     },
     "Tools & Skills": {
         "/tools": "List available tools",
         "/toolsets": "List available toolsets",
         "/skills": "Search, install, inspect, or manage skills from online registries",
-        "/cron": "Manage scheduled tasks (list, add, remove)",
+        "/cron": "Manage scheduled tasks (list, add/create, edit, pause, resume, run, remove)",
         "/reload-mcp": "Reload MCP servers from config.yaml",
     },
     "Info": {

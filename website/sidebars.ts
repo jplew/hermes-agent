@@ -22,6 +22,9 @@ const sidebars: SidebarsConfig = {
         'guides/daily-briefing-bot',
         'guides/team-telegram-assistant',
         'guides/python-library',
+        'guides/use-mcp-with-hermes',
+        'guides/use-soul-with-hermes',
+        'guides/use-voice-mode-with-hermes',
       ],
     },
     {
@@ -73,6 +76,7 @@ const sidebars: SidebarsConfig = {
           type: 'category',
           label: 'Web & Media',
           items: [
+            'user-guide/features/voice-mode',
             'user-guide/features/browser',
             'user-guide/features/vision',
             'user-guide/features/image-generation',
@@ -106,6 +110,7 @@ const sidebars: SidebarsConfig = {
         'developer-guide/architecture',
         'developer-guide/agent-loop',
         'developer-guide/provider-runtime',
+        'developer-guide/adding-providers',
         'developer-guide/prompt-assembly',
         'developer-guide/context-compression-and-caching',
         'developer-guide/gateway-internals',
@@ -128,6 +133,7 @@ const sidebars: SidebarsConfig = {
         'reference/slash-commands',
         'reference/tools-reference',
         'reference/toolsets-reference',
+        'reference/mcp-config-reference',
         'reference/skills-catalog',
         'reference/optional-skills-catalog',
         'reference/environment-variables',
