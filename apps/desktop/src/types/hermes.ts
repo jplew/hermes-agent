@@ -48,7 +48,7 @@ export interface OAuthProviderStatus {
 export interface OAuthProvider {
   cli_command: string
   docs_url: string
-  flow: 'device_code' | 'external' | 'pkce'
+  flow: 'device_code' | 'external' | 'loopback' | 'pkce'
   id: string
   name: string
   status: OAuthProviderStatus
@@ -72,6 +72,12 @@ export type OAuthStartResponse =
       session_id: string
       user_code: string
       verification_url: string
+    }
+  | {
+      auth_url: string
+      expires_in: number
+      flow: 'loopback'
+      session_id: string
     }
 
 export interface OAuthSubmitResponse {
@@ -244,6 +250,10 @@ export interface SessionInfo {
   cwd?: null | string
   ended_at: null | number
   id: string
+  /** Original root id of a compression chain, when this entry is a projected
+   *  continuation tip. Stable across compressions — used as the durable id for
+   *  pins so a pinned conversation survives auto-compression. */
+  _lineage_root_id?: null | string
   input_tokens: number
   is_active: boolean
   last_active: number
