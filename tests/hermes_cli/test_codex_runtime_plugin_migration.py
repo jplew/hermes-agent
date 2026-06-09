@@ -331,6 +331,30 @@ class TestMigrate:
         assert 'default_permissions = ":workspace"' in text
         assert report.wrote_permissions_default == ":workspace"
 
+    def test_configured_permissions_default_overrides_workspace(self, tmp_path):
+        report = migrate(
+            {"codex_runtime": {"default_permissions": "athabasca-hermes"}},
+            codex_home=tmp_path,
+            discover_plugins=False,
+            expose_hermes_tools=False,
+        )
+        assert report.written
+        text = (tmp_path / "config.toml").read_text()
+        assert 'default_permissions = ":athabasca-hermes"' in text
+        assert report.wrote_permissions_default == "athabasca-hermes"
+
+    def test_configured_none_permissions_skips_default(self, tmp_path):
+        report = migrate(
+            {"codex_runtime": {"default_permissions": "none"}},
+            codex_home=tmp_path,
+            discover_plugins=False,
+            expose_hermes_tools=False,
+        )
+        assert report.written
+        text = (tmp_path / "config.toml").read_text()
+        assert "default_permissions" not in text
+        assert report.wrote_permissions_default is None
+
     def test_explicit_none_permissions_skips_block(self, tmp_path):
         report = migrate({"mcp_servers": {"x": {"command": "y"}}},
                          codex_home=tmp_path,
