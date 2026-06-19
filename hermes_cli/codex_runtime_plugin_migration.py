@@ -606,6 +606,43 @@ def _build_hermes_tools_mcp_entry() -> dict:
     return out
 
 
+_DEFAULT_PERMISSION_SENTINELS = {"", "none", "null", "false", "off", "disabled"}
+
+
+def _resolve_default_permission_profile(
+    hermes_config: dict,
+    explicit_default: Optional[str],
+) -> Optional[str]:
+    """Resolve the Codex permissions profile Hermes should write.
+
+    ``explicit_default`` preserves the existing programmatic override used by
+    tests and direct callers. When callers use the normal default, Hermes config
+    can override it with:
+
+        codex_runtime:
+          default_permissions: athabasca-hermes
+
+    Set that config value to null/none/false/off to avoid writing
+    ``default_permissions`` at all.
+    """
+    if explicit_default != ":workspace":
+        return explicit_default
+    if not isinstance(hermes_config, dict):
+        return explicit_default
+    runtime_cfg = hermes_config.get("codex_runtime") or {}
+    if not isinstance(runtime_cfg, dict):
+        return explicit_default
+    if "default_permissions" not in runtime_cfg:
+        return explicit_default
+    value = runtime_cfg.get("default_permissions")
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    if normalized.lower() in _DEFAULT_PERMISSION_SENTINELS:
+        return None
+    return normalized
+
+
 def migrate(
     hermes_config: dict,
     *,
@@ -626,15 +663,17 @@ def migrate(
             the live codex CLI to migrate any installed curated plugins
             into [plugins."<name>@<marketplace>"] entries. Set False to
             skip the subprocess spawn (for tests or restricted environments).
-        default_permission_profile: when set (default ":workspace"), write
-            top-level `default_permissions = "<name>"` so users on this
-            runtime don't get an approval prompt on every write attempt.
+        default_permission_profile: when set, write top-level
+            `default_permissions = "<name>"` so users on this runtime don't
+            get an approval prompt on every write attempt. The default
+            ":workspace" can be overridden by Hermes config at
+            `codex_runtime.default_permissions`.
             Built-in codex profile names are ":workspace", ":read-only",
             ":danger-no-sandbox" (note the leading ":"). Also accepts a
             user-defined profile name (no leading ":") that the user has
             configured in their own [permissions.<name>] table. Set None
-            to leave permissions unset and let codex use its compiled-in
-            default (which is read-only).
+            or configure `none` to leave permissions unset and let codex use its
+            compiled-in default (which is read-only).
         expose_hermes_tools: when True (default), register Hermes' own
             tool surface (web_search, browser_*, delegate_task, vision,
             memory, skills, etc.) as an MCP server in ~/.codex/config.toml
@@ -653,6 +692,8 @@ def migrate(
         )
         return report
 
+    default_permission_profile = _resolve_default_permission_profile(
+        hermes_config, default_permission_profile)
     translated: dict[str, dict] = {}
     for name, cfg in hermes_servers.items():
         out, skipped = _translate_one_server(str(name), cfg or {})
